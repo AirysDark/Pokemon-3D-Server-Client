@@ -14,7 +14,8 @@ jobs:
       CONFIGURATION: Release
       CORE_CSPROJ: Pokemon.3D.Server.Core/Pokemon.3D.Server.Core.csproj
       CLIENT_GUI_CSPROJ: Pokemon.3D.Server.Client.GUI/Pokemon.3D.Server.Client.GUI.csproj
-      STP_VERSION: 2.3.0
+      STP_VERSION: 2.3.0      # SmartThreadPool.dll package version
+      STP_LIB_TFM: lib/net45  # DLL folder inside the package
 
     steps:
       - name: Checkout
@@ -26,14 +27,14 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # --- Patch project files safely ---
+      # --- Cleanly patch csproj files ---
       - name: Strip bad ProjectReference + guard all *\Packages\*.cs includes
         shell: pwsh
         run: |
           $core   = "${{ env.CORE_CSPROJ }}"
           $client = "${{ env.CLIENT_GUI_CSPROJ }}"
 
-          # 1) Remove stale SmartThreadPool ProjectReference in both projects
+          # 1) Remove stale ProjectReference to SmartThreadPool source (both projects)
           $regexPR = '(?s)\s*<ProjectReference[^>]*SmartThreadPool\\SmartThreadPool\\SmartThreadPool\.csproj.*?</ProjectReference>'
           foreach ($f in @($core, $client)) {
             if (Test-Path $f) {
@@ -46,7 +47,7 @@ jobs:
             }
           }
 
-          # 2) Guard ANY Compile Include under a \Packages\ folder (missing files => skip)
+          # 2) Guard ANY Compile Include under a \Packages\ folder (prevents CS2001)
           function Guard-PackagesIncludes($projPath) {
             if (!(Test-Path $projPath)) { return }
             [xml]$xml = Get-Content $projPath -Raw
@@ -62,20 +63,25 @@ jobs:
                 }
               }
             }
-            if ($changed) { $xml.Save($projPath); Write-Host "Guarded \\Packages\\*.cs includes in $projPath" }
+            if ($changed) {
+              $xml.Save($projPath)
+              Write-Host "Guarded \\Packages\\*.cs includes in $projPath"
+            } else {
+              Write-Host "No \\Packages\\*.cs includes to guard in $projPath"
+            }
           }
+
           Guard-PackagesIncludes $core
           Guard-PackagesIncludes $client
 
-      # --- Vendor SmartThreadPool via NuGet (correct package id = SmartThreadPool.dll) ---
+      # --- Vendor SmartThreadPool via NuGet (correct package id: SmartThreadPool.dll) ---
       - name: Fetch SmartThreadPool package
         shell: pwsh
         run: |
-          $ver = "${{ env.STP_VERSION }}"
-          nuget install SmartThreadPool.dll -Version $ver -OutputDirectory packages
-          $pkg = Join-Path "packages" ("SmartThreadPool.dll." + $ver)
+          nuget install SmartThreadPool.dll -Version "${{ env.STP_VERSION }}" -OutputDirectory packages
+          $pkg = Join-Path "packages" ("SmartThreadPool.dll." + "${{ env.STP_VERSION }}")
           if (!(Test-Path $pkg)) { throw "SmartThreadPool.dll package not found: $pkg" }
-          $dll = Join-Path $pkg "lib\net45\SmartThreadPool.dll"
+          $dll = Join-Path $pkg (Join-Path "${{ env.STP_LIB_TFM }}" "SmartThreadPool.dll")
           if (!(Test-Path $dll)) { throw "SmartThreadPool.dll not found: $dll" }
           Write-Host "Using SmartThreadPool: $dll"
 
@@ -84,40 +90,40 @@ jobs:
         run: |
           $core = "${{ env.CORE_CSPROJ }}"
           if (!(Test-Path $core)) { throw "Missing $core" }
-          $ver  = "${{ env.STP_VERSION }}"
-          $hint = "..\packages\SmartThreadPool.dll.$ver\lib\net45\SmartThreadPool.dll"
+          $hint = "..\packages\SmartThreadPool.dll.${{ env.STP_VERSION }}\${{ env.STP_LIB_TFM }}\SmartThreadPool.dll"
           $xml  = Get-Content $core -Raw
           if ($xml -notmatch 'Reference Include="SmartThreadPool"') {
             $ref = "  <ItemGroup>`n    <Reference Include=""SmartThreadPool"">`n      <HintPath>$hint</HintPath>`n      <Private>True</Private>`n    </Reference>`n  </ItemGroup>`n"
             $xml = [Regex]::Replace($xml, '(?s)</Project>\s*$', ($ref + '</Project>'))
             Set-Content $core $xml
             Write-Host "Added SmartThreadPool reference to Core"
-          } else { Write-Host "Core already has SmartThreadPool reference" }
+          } else {
+            Write-Host "Core already has SmartThreadPool reference"
+          }
 
       - name: Inject SmartThreadPool Reference (Client if needed)
         shell: pwsh
         run: |
           $client = "${{ env.CLIENT_GUI_CSPROJ }}"
           if (!(Test-Path $client)) { exit 0 }
-          $needs = (Get-Content $client -Raw) -match 'Amib\.Threading'
-          if ($needs) {
-            $xml = Get-Content $client -Raw
-            if ($xml -notmatch 'Reference Include="SmartThreadPool"') {
-              $ver  = "${{ env.STP_VERSION }}"
-              $hint = "..\packages\SmartThreadPool.dll.$ver\lib\net45\SmartThreadPool.dll"
-              $ref  = "  <ItemGroup>`n    <Reference Include=""SmartThreadPool"">`n      <HintPath>$hint</HintPath>`n      <Private>True</Private>`n    </Reference>`n  </ItemGroup>`n"
-              $xml  = [Regex]::Replace($xml, '(?s)</Project>\s*$', ($ref + '</Project>'))
-              Set-Content $client $xml
-              Write-Host "Added SmartThreadPool reference to Client"
-            } else { Write-Host "Client already has SmartThreadPool reference" }
-          } else { Write-Host "Client does not use Amib.Threading; skipping" }
+          $raw = Get-Content $client -Raw
+          if ($raw -match 'Amib\.Threading' -and $raw -notmatch 'Reference Include="SmartThreadPool"') {
+            $hint = "..\packages\SmartThreadPool.dll.${{ env.STP_VERSION }}\${{ env.STP_LIB_TFM }}\SmartThreadPool.dll"
+            $ref  = "  <ItemGroup>`n    <Reference Include=""SmartThreadPool"">`n      <HintPath>$hint</HintPath>`n      <Private>True</Private>`n    </Reference>`n  </ItemGroup>`n"
+            $raw  = [Regex]::Replace($raw, '(?s)</Project>\s*$', ($ref + '</Project>'))
+            Set-Content $client $raw
+            Write-Host "Added SmartThreadPool reference to Client"
+          } else {
+            Write-Host "Client STP reference not needed or already present"
+          }
 
-      # --- Restore remaining NuGet packages and build both projects ---
+      # --- Restore remaining NuGet packages (Newtonsoft.Json, SharpCompress, etc.) ---
       - name: Restore Core packages
         run: nuget restore "${{ env.CORE_CSPROJ }}"
       - name: Restore Client packages
         run: nuget restore "${{ env.CLIENT_GUI_CSPROJ }}"
 
+      # --- Build both projects ---
       - name: Build Server Core
         run: msbuild "${{ env.CORE_CSPROJ }}" /p:Configuration=${{ env.CONFIGURATION }} /m /v:m
       - name: Build Client GUI
