@@ -51,7 +51,6 @@ jobs:
             nuget install SmartThreadPool.dll -Version $env:STP_VERSION -OutputDirectory packages
           }
 
-          # Create or update Directory.Build.props to include STP reference + stub folder compile include
           if (!(Test-Path "Directory.Build.props")) {
             $lines = @(
               '<Project>',
@@ -86,17 +85,17 @@ jobs:
             }
           }
 
-      # HARD REMOVE the project's stale Compile includes that point to missing \Packages\*.cs
+      # ✅ FIX: remove stale Compile includes using paths RELATIVE TO THE PROJECT (no leading folder)
       - name: Write Directory.Build.targets (force-remove Packages/*.cs includes)
         shell: pwsh
         run: |
           $t = @(
             '<Project>',
-            '  <!-- Remove any Compile includes under these Packages folders at evaluation time -->',
+            '  <!-- These paths are relative to each project file, not the repo root -->',
             '  <ItemGroup>',
-            '    <Compile Remove="Pokemon.3D.Server.Core\RCON_GUI_Client_Listener\Packages\**\*.cs" />',
-            '    <Compile Remove="Pokemon.3D.Server.Core\Server_Client_Listener\Packages\**\*.cs" />',
-            '    <Compile Remove="Pokemon.3D.Server.Core\RCON_Client_Listener\Packages\**\*.cs" />',
+            '    <Compile Remove="RCON_GUI_Client_Listener\Packages\**\*.cs" />',
+            '    <Compile Remove="Server_Client_Listener\Packages\**\*.cs" />',
+            '    <Compile Remove="RCON_Client_Listener\Packages\**\*.cs" />',
             '  </ItemGroup>',
             '</Project>'
           )
