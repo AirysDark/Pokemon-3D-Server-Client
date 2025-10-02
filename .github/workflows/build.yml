@@ -1,4 +1,4 @@
-name: Build Server & Client (auto-fix + stubs)
+name: Build Server & Client (stable, no csproj edits)
 
 on:
   push:
@@ -12,10 +12,11 @@ jobs:
     runs-on: windows-latest
     env:
       CONFIGURATION: Release
+      CORE_DIR: Pokemon.3D.Server.Core
       CORE_CSPROJ: Pokemon.3D.Server.Core/Pokemon.3D.Server.Core.csproj
-      CLIENT_GUI_CSPROJ: Pokemon.3D.Server.Client.GUI/Pokemon.3D.Server.Client.GUI.csproj
+      CLIENT_CSPROJ: Pokemon.3D.Server.Client.GUI/Pokemon.3D.Server.Client.GUI.csproj
       STP_VERSION: 2.3.0
-      STP_LIB_TFM: lib/net45
+      STP_TFM: lib/net45
 
     steps:
       - name: Checkout
@@ -27,173 +28,133 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # 1) Remove stale SmartThreadPool ProjectReference + guard any \Packages\*.cs includes
-      - name: Patch csproj (strip bad ref + guard Packages)
-        shell: pwsh
-        run: |
-          $core   = "${{ env.CORE_CSPROJ }}"
-          $client = "${{ env.CLIENT_GUI_CSPROJ }}"
-
-          $regexPR = '(?s)\s*<ProjectReference[^>]*SmartThreadPool\\SmartThreadPool\\SmartThreadPool\.csproj.*?</ProjectReference>'
-          foreach ($f in @($core, $client)) {
-            if (Test-Path $f) {
-              $txt = Get-Content $f -Raw
-              if ($txt -match $regexPR) {
-                $txt = [Regex]::Replace($txt, $regexPR, '')
-                Set-Content $f $txt
-                Write-Host "Removed SmartThreadPool ProjectReference in $f"
-              }
-            }
-          }
-
-          function Guard-PackagesIncludes($projPath) {
-            if (!(Test-Path $projPath)) { return }
-            [xml]$xml = Get-Content $projPath -Raw
-            $ns = New-Object System.Xml.XmlNamespaceManager($xml.NameTable)
-            $ns.AddNamespace('msb', $xml.DocumentElement.NamespaceURI)
-            $changed = $false
-            foreach ($node in $xml.Project.SelectNodes("//msb:Compile[@Include]", $ns)) {
-              $inc = $node.GetAttribute("Include")
-              if ($inc -match "(?i)\\Packages\\.+\.cs$") {
-                if (-not $node.HasAttribute("Condition")) {
-                  $node.SetAttribute("Condition", "Exists('$inc')")
-                  $changed = $true
-                }
-              }
-            }
-            if ($changed) {
-              $xml.Save($projPath)
-              Write-Host "Guarded \\Packages\\*.cs includes in $projPath"
-            } else {
-              Write-Host "No \\Packages\\*.cs includes to guard in $projPath"
-            }
-          }
-
-          Guard-PackagesIncludes $core
-          Guard-PackagesIncludes $client
-
-      # 2) Vendor SmartThreadPool via NuGet (correct package id: SmartThreadPool.dll)
+      # 1) Fetch SmartThreadPool.dll once into repo-local packages/
       - name: Fetch SmartThreadPool.dll package
         shell: pwsh
         run: |
-          nuget install SmartThreadPool.dll -Version "${{ env.STP_VERSION }}" -OutputDirectory packages
-          $pkg = Join-Path "packages" ("SmartThreadPool.dll." + "${{ env.STP_VERSION }}")
+          nuget install SmartThreadPool.dll -Version $env:STP_VERSION -OutputDirectory packages
+          $pkg = Join-Path "packages" ("SmartThreadPool.dll." + $env:STP_VERSION)
           if (!(Test-Path $pkg)) { throw "SmartThreadPool.dll package not found: $pkg" }
-          $dll = Join-Path $pkg (Join-Path "${{ env.STP_LIB_TFM }}" "SmartThreadPool.dll")
+          $dll = Join-Path $pkg (Join-Path $env:STP_TFM "SmartThreadPool.dll")
           if (!(Test-Path $dll)) { throw "SmartThreadPool.dll not found: $dll" }
-          Write-Host "Using SmartThreadPool: $dll"
+          Write-Host "Using SmartThreadPool at $dll"
 
-      - name: Inject SmartThreadPool Reference (Core)
+      # 2) Provide global MSBuild props/targets (applies to all projects in the repo)
+      - name: Write Directory.Build.props (SmartThreadPool ref + stub includes)
         shell: pwsh
         run: |
-          $core = "${{ env.CORE_CSPROJ }}"
-          if (!(Test-Path $core)) { throw "Missing $core" }
-          $hint = "..\packages\SmartThreadPool.dll.${{ env.STP_VERSION }}\${{ env.STP_LIB_TFM }}\SmartThreadPool.dll"
-          $xml  = Get-Content $core -Raw
-          if ($xml -notmatch 'Reference Include="SmartThreadPool"') {
-            $ref = "  <ItemGroup>`n    <Reference Include=""SmartThreadPool"">`n      <HintPath>$hint</HintPath>`n      <Private>True</Private>`n    </Reference>`n  </ItemGroup>`n"
-            $xml = [Regex]::Replace($xml, '(?s)</Project>\s*$', ($ref + '</Project>'))
-            Set-Content $core $xml
-            Write-Host "Added SmartThreadPool reference to Core"
-          } else {
-            Write-Host "Core already has SmartThreadPool reference"
-          }
+          $props = @()
+          $props += '<Project>'
+          $props += '  <ItemGroup>'
+          $props += '    <!-- Make SmartThreadPool.dll available to all projects -->'
+          $props += '    <Reference Include="SmartThreadPool">'
+          $props += '      <HintPath>$(MSBuildThisFileDirectory)packages\SmartThreadPool.dll.$(STP_VER)\$(STP_TFM)\SmartThreadPool.dll</HintPath>'
+          $props += '      <Private>True</Private>'
+          $props += '    </Reference>'
+          $props += '  </ItemGroup>'
+          $props += ''
+          $props += '  <!-- Include generated stubs for Core (absolute paths built from this file) -->'
+          $props += '  <PropertyGroup>'
+          $props += '    <_CoreStubDir>$(MSBuildThisFileDirectory)$(CORE_DIR)\_GeneratedStubs\</_CoreStubDir>'
+          $props += '  </PropertyGroup>'
+          $props += '  <ItemGroup>'
+          $props += '    <Compile Include="$(_CoreStubDir)Package.cs" Condition="Exists($(_CoreStubDir)Package.cs)" />'
+          $props += '    <Compile Include="$(_CoreStubDir)PackageHandler.cs" Condition="Exists($(_CoreStubDir)PackageHandler.cs)" />'
+          $props += '  </ItemGroup>'
+          $props += '</Project>'
+          $content = $props -join "`r`n"
+          Set-Content -Path "Directory.Build.props" -Value $content -Encoding UTF8
 
-      - name: Inject SmartThreadPool Reference (Client if needed)
+          # supply variables used inside the props via msbuild env (we'll pass them at build time)
+          'Wrote Directory.Build.props'
+
+      - name: Write Directory.Build.targets (drop missing \Packages\*.cs)
         shell: pwsh
         run: |
-          $client = "${{ env.CLIENT_GUI_CSPROJ }}"
-          if (!(Test-Path $client)) { exit 0 }
-          $raw = Get-Content $client -Raw
-          if ($raw -match 'Amib\.Threading' -and $raw -notmatch 'Reference Include="SmartThreadPool"') {
-            $hint = "..\packages\SmartThreadPool.dll.${{ env.STP_VERSION }}\${{ env.STP_LIB_TFM }}\SmartThreadPool.dll"
-            $ref  = "  <ItemGroup>`n    <Reference Include=""SmartThreadPool"">`n      <HintPath>$hint</HintPath>`n      <Private>True</Private>`n    </Reference>`n  </ItemGroup>`n"
-            $raw  = [Regex]::Replace($raw, '(?s)</Project>\s*$', ($ref + '</Project>'))
-            Set-Content $client $raw
-            Write-Host "Added SmartThreadPool reference to Client"
-          } else {
-            Write-Host "Client STP reference not needed or already present"
-          }
+          $t = @()
+          $t += '<Project>'
+          $t += '  <!-- Remove any Compile includes under \Packages\ if the files do not exist -->'
+          $t += '  <Target Name="FilterMissingPackagesSources" BeforeTargets="CoreCompile">'
+          $t += '    <ItemGroup>'
+          $t += '      <!-- Unconditionally remove nonexistent \Packages\*.cs (prevents CS2001) -->'
+          $t += '      <Compile Remove="**\Packages\**\*.cs" Condition="!Exists(''@(Compile)'')" />'
+          $t += '    </ItemGroup>'
+          $t += '  </Target>'
+          $t += '</Project>'
+          $content = $t -join "`r`n"
+          Set-Content -Path "Directory.Build.targets" -Value $content -Encoding UTF8
+          'Wrote Directory.Build.targets'
 
-      # 3) If Packages/*.cs are missing, generate minimal stubs so types exist
-      - name: Generate stubs for missing Package/PackageHandler
+      # 3) Generate stubs ONLY if the real Package/PackageHandler are missing
+      - name: Generate minimal Package/PackageHandler stubs (if missing)
         shell: pwsh
         run: |
-          $coreDir = Split-Path "${{ env.CORE_CSPROJ }}"
-          $player  = Join-Path $coreDir "Server_Client_Listener\Players\Player.cs"
-          $ns = $null
+          $coreDir = "${{ env.CORE_DIR }}"
+          $real1 = Join-Path $coreDir "Server_Client_Listener\Packages\Package.cs"
+          $real2 = Join-Path $coreDir "Server_Client_Listener\Packages\PackageHandler.cs"
+          $need = -not ((Test-Path $real1) -and (Test-Path $real2))
 
-          # Try to infer namespace from Player.cs
-          if (Test-Path $player) {
-            $text = Get-Content $player -Raw
-            $m = [Regex]::Match($text, 'namespace\s+([A-Za-z0-9_.]+)')
-            if ($m.Success) { $ns = $m.Groups[1].Value }
-            # Prefer a using ...Packages; if present
-            $u = [Regex]::Match($text, 'using\s+([A-Za-z0-9_.]+\.Packages)\s*;')
-            if ($u.Success) { $ns = $u.Groups[1].Value }
-          }
-          if (-not $ns) { $ns = "Temporary.Stubs" }  # fallback
+          if ($need) {
+            $stubDir = Join-Path $coreDir "_GeneratedStubs"
+            New-Item -ItemType Directory -Force -Path $stubDir | Out-Null
 
-          $stubDir = Join-Path $coreDir "_GeneratedStubs"
-          New-Item -ItemType Directory -Force -Path $stubDir | Out-Null
-          $pkgFile = Join-Path $stubDir "Package.cs"
-          $hdlFile = Join-Path $stubDir "PackageHandler.cs"
+            # Try to infer a namespace from Player.cs; else fallback
+            $ns = "Temporary.Stubs"
+            $player = Join-Path $coreDir "Server_Client_Listener\Players\Player.cs"
+            if (Test-Path $player) {
+              $raw = Get-Content $player -Raw
+              $m = [Regex]::Match($raw, 'namespace\s+([A-Za-z0-9_.]+)')
+              if ($m.Success) { $ns = $m.Groups[1].Value }
+              $u = [Regex]::Match($raw, 'using\s+([A-Za-z0-9_.]+\.Packages)\s*;')
+              if ($u.Success) { $ns = $u.Groups[1].Value }
+            }
 
-          $pkgSrc = @"
-// <auto-generated/>
-namespace $ns
-{
-    public class Package
-    {
-        // Minimal surface so code compiles; extend if the build later requests members
-        public int Id { get; set; }
-        public string Name { get; set; }
-        public byte[] Data { get; set; }
-        public Package() {}
-        public Package(int id, string name, byte[] data = null) { Id = id; Name = name; Data = data; }
-    }
-}
-"
-          $hdlSrc = @"
-// <auto-generated/>
-namespace $ns
-{
-    public static class PackageHandler
-    {
-        // Provide no-op handlers; extend if compile asks for specific APIs
-        public static void Send(Package p) { }
-        public static Package Parse(byte[] buffer) { return new Package(); }
-    }
-}
-"
-          Set-Content -Path $pkgFile -Value $pkgSrc -Encoding UTF8
-          Set-Content -Path $hdlFile -Value $hdlSrc -Encoding UTF8
+            $pkg = @()
+            $pkg += '// <auto-generated/>'
+            $pkg += "namespace $ns"
+            $pkg += '{'
+            $pkg += '  public class Package'
+            $pkg += '  {'
+            $pkg += '    public int Id { get; set; }'
+            $pkg += '    public string Name { get; set; }'
+            $pkg += '    public byte[] Data { get; set; }'
+            $pkg += '    public Package() {}'
+            $pkg += '    public Package(int id, string name, byte[] data = null) { Id = id; Name = name; Data = data; }'
+            $pkg += '  }'
+            $pkg += '}'
+            Set-Content -Path (Join-Path $stubDir "Package.cs") -Value ($pkg -join "`r`n") -Encoding UTF8
 
-          # Ensure Core csproj includes the generated stubs
-          $csproj = "${{ env.CORE_CSPROJ }}"
-          $xml = Get-Content $csproj -Raw
-          if ($xml -notmatch "_GeneratedStubs") {
-            $add = "  <ItemGroup>`n    <Compile Include=""_GeneratedStubs\Package.cs"" />`n    <Compile Include=""_GeneratedStubs\PackageHandler.cs"" />`n  </ItemGroup>`n"
-            $xml = [Regex]::Replace($xml, '(?s)</Project>\s*$', ($add + '</Project>'))
-            Set-Content $csproj $xml
-            Write-Host "Injected generated stubs into Core csproj under namespace: $ns"
+            $hdl = @()
+            $hdl += '// <auto-generated/>'
+            $hdl += "namespace $ns"
+            $hdl += '{'
+            $hdl += '  public static class PackageHandler'
+            $hdl += '  {'
+            $hdl += '    public static void Send(Package p) {}'
+            $hdl += '    public static Package Parse(byte[] buffer) { return new Package(); }'
+            $hdl += '  }'
+            $hdl += '}'
+            Set-Content -Path (Join-Path $stubDir "PackageHandler.cs") -Value ($hdl -join "`r`n") -Encoding UTF8
+
+            Write-Host "Generated stubs in $stubDir (namespace: $ns)"
           } else {
-            Write-Host "Stub entries already present in csproj."
+            Write-Host "Real Package files exist; no stubs generated."
           }
 
-      # 4) Restore remaining NuGet packages (Newtonsoft.Json, SharpCompress, etc.)
+      # 4) Restore other NuGets (Newtonsoft.Json, SharpCompress, etc.)
       - name: Restore Core packages
         run: nuget restore "${{ env.CORE_CSPROJ }}"
       - name: Restore Client packages
-        run: nuget restore "${{ env.CLIENT_GUI_CSPROJ }}"
+        run: nuget restore "${{ env.CLIENT_CSPROJ }}"
 
-      # 5) Build both projects
+      # 5) Build both projects (pass props variables for STP)
       - name: Build Server Core
-        run: msbuild "${{ env.CORE_CSPROJ }}" /p:Configuration=${{ env.CONFIGURATION }} /m /v:m
-      - name: Build Client GUI
-        run: msbuild "${{ env.CLIENT_GUI_CSPROJ }}" /p:Configuration=${{ env.CONFIGURATION }} /m /v:m
+        run: msbuild "${{ env.CORE_CSPROJ }}" /p:Configuration=${{ env.CONFIGURATION }} /p:STP_VER=${{ env.STP_VERSION }} /p:STP_TFM=${{ env.STP_TFM }} /p:CORE_DIR=${{ env.CORE_DIR }} /m /v:m
 
-      # 6) Package artifacts
+      - name: Build Client GUI
+        run: msbuild "${{ env.CLIENT_CSPROJ }}" /p:Configuration=${{ env.CONFIGURATION }} /p:STP_VER=${{ env.STP_VERSION }} /p:STP_TFM=${{ env.STP_TFM }} /p:CORE_DIR=${{ env.CORE_DIR }} /m /v:m
+
+      # 6) Zip artifacts
       - name: Zip Server
         shell: pwsh
         run: |
