@@ -11,20 +11,22 @@ jobs:
   build:
     runs-on: windows-latest
 
+    # Build both configs; remove Debug if you only want Release
     strategy:
       fail-fast: false
       matrix:
-        configuration: [Debug, Release]
+        configuration: [Release]
 
     env:
       CONFIGURATION: ${{ matrix.configuration }}
-      # If your solution has a .sln, set it here (optional):
-      # SOLUTION: Pokemon.3D.Server.Client.sln
 
-      # Paths to the classic projects (adjust if your folders differ)
+      # If you have a .sln, set it here; otherwise leave empty
+      SOLUTION: ""
+
+      # Paths to the projects (adjust if your folders differ)
       CORE_CSPROJ: Pokemon.3D.Server.Core/Pokemon.3D.Server.Core.csproj
       CLIENT_GUI_CSPROJ: Pokemon.3D.Server.Client.GUI/Pokemon.3D.Server.Client.GUI.csproj
-      # If the Updater causes trouble, leave it commented out:
+      # If Updater causes issues, keep it disabled:
       # UPDATER_CSPROJ: Pokemon.3D.Server.Client.Updater/Pokemon.3D.Server.Client.Updater.csproj
 
     steps:
@@ -37,57 +39,58 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # Cache global NuGet packages (helps if any packages use global cache)
+      # Cache NuGet (classic packages.config still benefits)
       - name: Cache NuGet packages
         uses: actions/cache@v4
         with:
           path: |
             ~\AppData\Local\NuGet\Cache
             ~\AppData\Local\NuGet\v3-cache
+            packages
           key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.config') }}
           restore-keys: |
             nuget-${{ runner.os }}-
 
-      # If you have a solution file, prefer restoring that.
+      # Restore via .sln if you have one
       - name: Restore (solution) if present
         if: env.SOLUTION != ''
         run: nuget restore $env:SOLUTION
 
-      # Otherwise, restore each classic project that uses packages.config
+      # Otherwise restore per-project (packages.config style)
       - name: Restore (per project)
         if: env.SOLUTION == ''
         shell: pwsh
         run: |
-          Write-Host "Restoring classic projects with nuget.exe..."
           nuget restore "$env:CORE_CSPROJ"
           nuget restore "$env:CLIENT_GUI_CSPROJ"
           # if ($env:UPDATER_CSPROJ) { nuget restore "$env:UPDATER_CSPROJ" }
 
-      # Build Core (Server)
+      # --- Build BOTH projects in this single job ---
+
       - name: Build Server Core
         run: msbuild "$env:CORE_CSPROJ" /p:Configuration=$env:CONFIGURATION /m /v:m
 
-      # Build Client GUI
       - name: Build Client GUI
         run: msbuild "$env:CLIENT_GUI_CSPROJ" /p:Configuration=$env:CONFIGURATION /m /v:m
 
-      # Package artifacts (zips)
-      - name: Package Server artifact
+      # --- Package each output separately ---
+
+      - name: Zip Server artifact
         shell: pwsh
         run: |
           $outDir = "Pokemon.3D.Server.Core\bin\$env:CONFIGURATION"
-          $zip = "Pokemon3D-Server-$env:CONFIGURATION.zip"
           if (!(Test-Path $outDir)) { throw "Server output not found: $outDir" }
-          Compress-Archive -Path "$outDir\*" -DestinationPath $zip -Force
-      - name: Package Client artifact
+          Compress-Archive -Path "$outDir\*" -DestinationPath "Pokemon3D-Server-$env:CONFIGURATION.zip" -Force
+
+      - name: Zip Client artifact
         shell: pwsh
         run: |
           $outDir = "Pokemon.3D.Server.Client.GUI\bin\$env:CONFIGURATION"
-          $zip = "Pokemon3D-Client-$env:CONFIGURATION.zip"
           if (!(Test-Path $outDir)) { throw "Client output not found: $outDir" }
-          Compress-Archive -Path "$outDir\*" -DestinationPath $zip -Force
+          Compress-Archive -Path "$outDir\*" -DestinationPath "Pokemon3D-Client-$env:CONFIGURATION.zip" -Force
 
-      # Upload artifacts
+      # --- Upload artifacts so you can download the zips ---
+
       - name: Upload Server ZIP
         uses: actions/upload-artifact@v4
         with:
