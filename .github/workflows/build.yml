@@ -14,8 +14,6 @@ jobs:
       CONFIGURATION: Release
       CORE_CSPROJ: Pokemon.3D.Server.Core/Pokemon.3D.Server.Core.csproj
       CLIENT_GUI_CSPROJ: Pokemon.3D.Server.Client.GUI/Pokemon.3D.Server.Client.GUI.csproj
-      STP_VERSION: 2.2.2
-      STP_LIB_TFM: lib/net45
 
     steps:
       - name: Checkout
@@ -27,29 +25,22 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # --- Patch csproj files safely (no YAML-tricky here-strings) ---
       - name: Strip bad ProjectReference + guard missing RCON files
         shell: pwsh
         run: |
           $core   = "${{ env.CORE_CSPROJ }}"
           $client = "${{ env.CLIENT_GUI_CSPROJ }}"
-
-          # 1) Remove stale ProjectReference to SmartThreadPool source
-          $removePR = {
-            param($file)
-            if (!(Test-Path $file)) { return }
-            $txt = Get-Content $file -Raw
-            $regexPR = '(?s)\s*<ProjectReference[^>]*SmartThreadPool\\SmartThreadPool\\SmartThreadPool\.csproj.*?</ProjectReference>'
-            if ($txt -match $regexPR) {
-              $txt = [Regex]::Replace($txt, $regexPR, '')
-              Set-Content $file $txt
-              Write-Host "Removed ProjectReference in $file"
+          $regexPR = '(?s)\s*<ProjectReference[^>]*SmartThreadPool\\SmartThreadPool\\SmartThreadPool\.csproj.*?</ProjectReference>'
+          foreach ($f in @($core, $client)) {
+            if (Test-Path $f) {
+              $txt = Get-Content $f -Raw
+              if ($txt -match $regexPR) {
+                $txt = [Regex]::Replace($txt, $regexPR, '')
+                Set-Content $f $txt
+                Write-Host "Removed ProjectReference in $f"
+              }
             }
           }
-          & $removePR $core
-          & $removePR $client
-
-          # 2) Guard RCON 'Packages' files so CSC skips if missing
           if (Test-Path $core) {
             $txt = Get-Content $core -Raw
             $targets = @(
@@ -58,32 +49,30 @@ jobs:
               'RCON_GUI_Client_Listener\Packages\Package.cs'
             )
             foreach ($p in $targets) {
-              $pattern1 = "<Compile Include=""$p"" />"
-              $pattern2 = "<Compile Include=""$p""/>"
-              $guarded  = "<Compile Include=""$p"" Condition=""Exists('$p')"" />"
-              $txt = $txt.Replace($pattern1, $guarded).Replace($pattern2, $guarded)
+              $txt = $txt.Replace("<Compile Include=""$p"" />", "<Compile Include=""$p"" Condition=""Exists('$p')"" />")
+              $txt = $txt.Replace("<Compile Include=""$p""/>", "<Compile Include=""$p"" Condition=""Exists('$p')"" />")
             }
             Set-Content $core $txt
-            Write-Host "Guarded RCON compile includes in $core"
           }
 
-      # --- Vendor SmartThreadPool via NuGet (no repo changes required) ---
       - name: Fetch SmartThreadPool package
         shell: pwsh
         run: |
-          nuget install SmartThreadPool -Version $env:STP_VERSION -OutputDirectory packages
-          $pkg = Join-Path "packages" ("SmartThreadPool." + $env:STP_VERSION)
-          if (!(Test-Path $pkg)) { throw "SmartThreadPool package not found: $pkg" }
-          $dll = Join-Path $pkg (Join-Path $env:STP_LIB_TFM "SmartThreadPool.dll")
-          if (!(Test-Path $dll)) { throw "SmartThreadPool DLL not found: $dll" }
-          Write-Host "Using SmartThreadPool DLL: $dll"
+          $ver = "2.3.0"
+          nuget install SmartThreadPool.dll -Version $ver -OutputDirectory packages
+          $pkg = Join-Path "packages" ("SmartThreadPool.dll." + $ver)
+          if (!(Test-Path $pkg)) { throw "SmartThreadPool.dll package not found: $pkg" }
+          $dll = Join-Path $pkg "lib\net45\SmartThreadPool.dll"
+          if (!(Test-Path $dll)) { throw "SmartThreadPool.dll not found: $dll" }
+          Write-Host "Using: $dll"
 
       - name: Inject SmartThreadPool Reference (Core)
         shell: pwsh
         run: |
           $core = "${{ env.CORE_CSPROJ }}"
           if (!(Test-Path $core)) { throw "Missing $core" }
-          $hint = "..\packages\SmartThreadPool.${{ env.STP_VERSION }}\${{ env.STP_LIB_TFM }}\SmartThreadPool.dll"
+          $ver  = "2.3.0"
+          $hint = "..\packages\SmartThreadPool.dll.$ver\lib\net45\SmartThreadPool.dll"
           $xml  = Get-Content $core -Raw
           if ($xml -notmatch 'Reference Include="SmartThreadPool"') {
             $ref = "  <ItemGroup>`n    <Reference Include=""SmartThreadPool"">`n      <HintPath>$hint</HintPath>`n      <Private>True</Private>`n    </Reference>`n  </ItemGroup>`n"
@@ -103,9 +92,10 @@ jobs:
           if ($needs) {
             $xml = Get-Content $client -Raw
             if ($xml -notmatch 'Reference Include="SmartThreadPool"') {
-              $hint = "..\packages\SmartThreadPool.${{ env.STP_VERSION }}\${{ env.STP_LIB_TFM }}\SmartThreadPool.dll"
-              $ref = "  <ItemGroup>`n    <Reference Include=""SmartThreadPool"">`n      <HintPath>$hint</HintPath>`n      <Private>True</Private>`n    </Reference>`n  </ItemGroup>`n"
-              $xml = [Regex]::Replace($xml, '(?s)</Project>\s*$', ($ref + '</Project>'))
+              $ver  = "2.3.0"
+              $hint = "..\packages\SmartThreadPool.dll.$ver\lib\net45\SmartThreadPool.dll"
+              $ref  = "  <ItemGroup>`n    <Reference Include=""SmartThreadPool"">`n      <HintPath>$hint</HintPath>`n      <Private>True</Private>`n    </Reference>`n  </ItemGroup>`n"
+              $xml  = [Regex]::Replace($xml, '(?s)</Project>\s*$', ($ref + '</Project>'))
               Set-Content $client $xml
               Write-Host "Added SmartThreadPool reference to Client"
             } else {
@@ -115,20 +105,16 @@ jobs:
             Write-Host "Client does not use Amib.Threading; skipping"
           }
 
-      # --- Restore remaining NuGet packages and build both projects ---
       - name: Restore Core packages
         run: nuget restore "${{ env.CORE_CSPROJ }}"
-
       - name: Restore Client packages
         run: nuget restore "${{ env.CLIENT_GUI_CSPROJ }}"
 
       - name: Build Server Core
         run: msbuild "${{ env.CORE_CSPROJ }}" /p:Configuration=${{ env.CONFIGURATION }} /m /v:m
-
       - name: Build Client GUI
         run: msbuild "${{ env.CLIENT_GUI_CSPROJ }}" /p:Configuration=${{ env.CONFIGURATION }} /m /v:m
 
-      # --- Package artifacts ---
       - name: Zip Server
         shell: pwsh
         run: |
