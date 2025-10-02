@@ -1,4 +1,4 @@
-name: Build Server & Client
+name: Build Server & Client (auto-fix refs)
 
 on:
   push:
@@ -10,10 +10,15 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+
     env:
       CONFIGURATION: Release
       CORE_CSPROJ: Pokemon.3D.Server.Core/Pokemon.3D.Server.Core.csproj
       CLIENT_GUI_CSPROJ: Pokemon.3D.Server.Client.GUI/Pokemon.3D.Server.Client.GUI.csproj
+      # SmartThreadPool version to fetch if needed
+      STP_VERSION: 2.2.2
+      # The TFM folder inside the package (works for net48-targeting projects too)
+      STP_LIB_TFM: lib/net45
 
     steps:
       - name: Checkout
@@ -25,31 +30,127 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # Restore classic packages (packages.config) – pulls SmartThreadPool, Newtonsoft, etc.
+      # --- Auto-patch project files so CI doesn't break ---
+
+      - name: Remove broken SmartThreadPool ProjectReference + guard missing RCON files
+        shell: pwsh
+        run: |
+          $core   = "${{ env.CORE_CSPROJ }}"
+          $client = "${{ env.CLIENT_GUI_CSPROJ }}"
+
+          # 1) Remove any ProjectReference pointing to non-existent SmartThreadPool source
+          $regexPR = '(?s)\s*<ProjectReference[^>]*SmartThreadPool\\SmartThreadPool\\SmartThreadPool\.csproj.*?</ProjectReference>'
+          foreach ($f in @($core, $client)) {
+            if (Test-Path $f) {
+              $t = Get-Content $f -Raw
+              if ($t -match $regexPR) {
+                Write-Host "Stripping stale SmartThreadPool ProjectReference in $f"
+                $t = $t -replace $regexPR, ''
+                Set-Content $f $t
+              }
+            }
+          }
+
+          # 2) Guard missing RCON 'Packages' files so CSC doesn't fail if files aren't present
+          $guards = @(
+            'RCON_Client_Listener\Packages\Package.cs',
+            'RCON_Client_Listener\Packages\PackageHandler.cs',
+            'RCON_GUI_Client_Listener\Packages\Package.cs'
+          )
+          if (Test-Path $core) {
+            $t = Get-Content $core -Raw
+            foreach ($p in $guards) {
+              $pattern = [Regex]::Escape("<Compile Include=""$p"" />")
+              $guarded = "<Compile Include=""$p"" Condition=""Exists('$p')"" />"
+              $t = $t -replace $pattern, $guarded
+              # also handle self-closing variants with spaces
+              $t = $t -replace "<Compile\s+Include=""$([Regex]::Escape($p))""\s*/>", $guarded
+            }
+            Set-Content $core $t
+          }
+
+      - name: Fetch SmartThreadPool package (DLL vendor—no repo changes needed)
+        shell: pwsh
+        run: |
+          nuget install SmartThreadPool -Version $env:STP_VERSION -OutputDirectory packages
+          $pkg = Join-Path "packages" "SmartThreadPool.$($env:STP_VERSION)"
+          if (!(Test-Path $pkg)) { throw "SmartThreadPool package not found at $pkg" }
+          $dll = Join-Path $pkg "$($env:STP_LIB_TFM)\SmartThreadPool.dll"
+          if (!(Test-Path $dll)) { throw "SmartThreadPool DLL not found at $dll" }
+          Write-Host "SmartThreadPool DLL: $dll"
+
+      - name: Inject SmartThreadPool <Reference> into Core (if missing)
+        shell: pwsh
+        run: |
+          $core = "${{ env.CORE_CSPROJ }}"
+          $hint = "..\packages\SmartThreadPool.${{ env.STP_VERSION }}\${{ env.STP_LIB_TFM }}\SmartThreadPool.dll"
+          $xml  = Get-Content $core -Raw
+          if ($xml -notmatch 'Reference Include="SmartThreadPool"') {
+            Write-Host "Adding SmartThreadPool reference to $core"
+            $ref = @"
+  <ItemGroup>
+    <Reference Include="SmartThreadPool">
+      <HintPath>$hint</HintPath>
+      <Private>True</Private>
+    </Reference>
+  </ItemGroup>
+"@
+            $xml = $xml -replace '(?s)</Project>', "$ref`r`n</Project>"
+            Set-Content $core $xml
+          } else {
+            Write-Host "SmartThreadPool reference already present in $core"
+          }
+
+      - name: Inject SmartThreadPool <Reference> into Client (only if needed)
+        shell: pwsh
+        run: |
+          $client = "${{ env.CLIENT_GUI_CSPROJ }}"
+          if (Test-Path $client) {
+            $xml = Get-Content $client -Raw
+            if ($xml -match 'Amib\.Threading' -and $xml -notmatch 'Reference Include="SmartThreadPool"') {
+              Write-Host "Adding SmartThreadPool reference to $client"
+              $hint = "..\packages\SmartThreadPool.${{ env.STP_VERSION }}\${{ env.STP_LIB_TFM }}\SmartThreadPool.dll"
+              $ref = @"
+  <ItemGroup>
+    <Reference Include="SmartThreadPool">
+      <HintPath>$hint</HintPath>
+      <Private>True</Private>
+    </Reference>
+  </ItemGroup>
+"@
+              $xml = $xml -replace '(?s)</Project>', "$ref`r`n</Project>"
+              Set-Content $client $xml
+            } else {
+              Write-Host "Client does not need SmartThreadPool or reference already exists."
+            }
+          }
+
+      # --- Restore remaining NuGet packages (Newtonsoft.Json, SharpCompress, etc.) ---
       - name: Restore Core packages
-        run: nuget restore "$env:CORE_CSPROJ"
+        run: nuget restore "${{ env.CORE_CSPROJ }}"
       - name: Restore Client packages
-        run: nuget restore "$env:CLIENT_GUI_CSPROJ"
+        run: nuget restore "${{ env.CLIENT_GUI_CSPROJ }}"
 
+      # --- Build both projects ---
       - name: Build Server Core
-        run: msbuild "$env:CORE_CSPROJ" /p:Configuration=$env:CONFIGURATION /m /v:m
-
+        run: msbuild "${{ env.CORE_CSPROJ }}" /p:Configuration=${{ env.CONFIGURATION }} /m /v:m
       - name: Build Client GUI
-        run: msbuild "$env:CLIENT_GUI_CSPROJ" /p:Configuration=$env:CONFIGURATION /m /v:m
+        run: msbuild "${{ env.CLIENT_GUI_CSPROJ }}" /p:Configuration=${{ env.CONFIGURATION }} /m /v:m
 
+      # --- Package artifacts ---
       - name: Zip Server
         shell: pwsh
         run: |
-          $out = "Pokemon.3D.Server.Core\bin\$env:CONFIGURATION"
+          $out = "Pokemon.3D.Server.Core\bin\${{ env.CONFIGURATION }}"
           if (!(Test-Path $out)) { throw "Missing $out" }
-          Compress-Archive -Path "$out\*" -DestinationPath "Pokemon3D-Server-$env:CONFIGURATION.zip" -Force
+          Compress-Archive -Path "$out\*" -DestinationPath "Pokemon3D-Server-${{ env.CONFIGURATION }}.zip" -Force
 
       - name: Zip Client
         shell: pwsh
         run: |
-          $out = "Pokemon.3D.Server.Client.GUI\bin\$env:CONFIGURATION"
+          $out = "Pokemon.3D.Server.Client.GUI\bin\${{ env.CONFIGURATION }}"
           if (!(Test-Path $out)) { throw "Missing $out" }
-          Compress-Archive -Path "$out\*" -DestinationPath "Pokemon3D-Client-$env:CONFIGURATION.zip" -Force
+          Compress-Archive -Path "$out\*" -DestinationPath "Pokemon3D-Client-${{ env.CONFIGURATION }}.zip" -Force
 
       - name: Upload Server ZIP
         uses: actions/upload-artifact@v4
