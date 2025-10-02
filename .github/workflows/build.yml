@@ -1,4 +1,4 @@
-name: Build Pokemon 3D (Server + Client)
+name: Build Server & Client (no NuGet for STP)
 
 on:
   push:
@@ -10,62 +10,28 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-
-    # Build both configs; remove Debug if you only want Release
-    strategy:
-      fail-fast: false
-      matrix:
-        configuration: [Release]
-
     env:
-      CONFIGURATION: ${{ matrix.configuration }}
-
-      # If you have a .sln, set it here; otherwise leave empty
-      SOLUTION: ""
-
-      # Paths to the projects (adjust if your folders differ)
+      CONFIGURATION: Release
       CORE_CSPROJ: Pokemon.3D.Server.Core/Pokemon.3D.Server.Core.csproj
       CLIENT_GUI_CSPROJ: Pokemon.3D.Server.Client.GUI/Pokemon.3D.Server.Client.GUI.csproj
-      # If Updater causes issues, keep it disabled:
-      # UPDATER_CSPROJ: Pokemon.3D.Server.Client.Updater/Pokemon.3D.Server.Client.Updater.csproj
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Keep NuGet restore ONLY if you still use other packages
       - name: Setup NuGet
         uses: nuget/setup-nuget@v2
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # Cache NuGet (classic packages.config still benefits)
-      - name: Cache NuGet packages
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~\AppData\Local\NuGet\Cache
-            ~\AppData\Local\NuGet\v3-cache
-            packages
-          key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.config') }}
-          restore-keys: |
-            nuget-${{ runner.os }}-
-
-      # Restore via .sln if you have one
-      - name: Restore (solution) if present
-        if: env.SOLUTION != ''
-        run: nuget restore $env:SOLUTION
-
-      # Otherwise restore per-project (packages.config style)
-      - name: Restore (per project)
-        if: env.SOLUTION == ''
-        shell: pwsh
-        run: |
-          nuget restore "$env:CORE_CSPROJ"
-          nuget restore "$env:CLIENT_GUI_CSPROJ"
-          # if ($env:UPDATER_CSPROJ) { nuget restore "$env:UPDATER_CSPROJ" }
-
-      # --- Build BOTH projects in this single job ---
+      # If you want to truly skip all restores, delete the two steps below.
+      # (But most P3D forks still need Newtonsoft.Json etc.)
+      - name: Restore Core packages (classic)
+        run: nuget restore "$env:CORE_CSPROJ"
+      - name: Restore Client packages (classic)
+        run: nuget restore "$env:CLIENT_GUI_CSPROJ"
 
       - name: Build Server Core
         run: msbuild "$env:CORE_CSPROJ" /p:Configuration=$env:CONFIGURATION /m /v:m
@@ -73,32 +39,28 @@ jobs:
       - name: Build Client GUI
         run: msbuild "$env:CLIENT_GUI_CSPROJ" /p:Configuration=$env:CONFIGURATION /m /v:m
 
-      # --- Package each output separately ---
-
-      - name: Zip Server artifact
+      - name: Zip Server
         shell: pwsh
         run: |
-          $outDir = "Pokemon.3D.Server.Core\bin\$env:CONFIGURATION"
-          if (!(Test-Path $outDir)) { throw "Server output not found: $outDir" }
-          Compress-Archive -Path "$outDir\*" -DestinationPath "Pokemon3D-Server-$env:CONFIGURATION.zip" -Force
+          $out = "Pokemon.3D.Server.Core\bin\$env:CONFIGURATION"
+          if (!(Test-Path $out)) { throw "Missing $out" }
+          Compress-Archive -Path "$out\*" -DestinationPath "Pokemon3D-Server-$env:CONFIGURATION.zip" -Force
 
-      - name: Zip Client artifact
+      - name: Zip Client
         shell: pwsh
         run: |
-          $outDir = "Pokemon.3D.Server.Client.GUI\bin\$env:CONFIGURATION"
-          if (!(Test-Path $outDir)) { throw "Client output not found: $outDir" }
-          Compress-Archive -Path "$outDir\*" -DestinationPath "Pokemon3D-Client-$env:CONFIGURATION.zip" -Force
-
-      # --- Upload artifacts so you can download the zips ---
+          $out = "Pokemon.3D.Server.Client.GUI\bin\$env:CONFIGURATION"
+          if (!(Test-Path $out)) { throw "Missing $out" }
+          Compress-Archive -Path "$out\*" -DestinationPath "Pokemon3D-Client-$env:CONFIGURATION.zip" -Force
 
       - name: Upload Server ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: Pokemon3D-Server-${{ matrix.configuration }}
-          path: Pokemon3D-Server-${{ matrix.configuration }}.zip
+          name: Pokemon3D-Server-${{ env.CONFIGURATION }}
+          path: Pokemon3D-Server-${{ env.CONFIGURATION }}.zip
 
       - name: Upload Client ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: Pokemon3D-Client-${{ matrix.configuration }}
-          path: Pokemon3D-Client-${{ matrix.configuration }}.zip
+          name: Pokemon3D-Client-${{ env.CONFIGURATION }}
+          path: Pokemon3D-Client-${{ env.CONFIGURATION }}.zip
