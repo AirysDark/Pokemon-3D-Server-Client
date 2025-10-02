@@ -1,4 +1,4 @@
-name: Build Server & Client (no NuGet for STP)
+name: Build Server & Client
 
 on:
   push:
@@ -19,18 +19,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Keep NuGet restore ONLY if you still use other packages
       - name: Setup NuGet
         uses: nuget/setup-nuget@v2
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # If you want to truly skip all restores, delete the two steps below.
-      # (But most P3D forks still need Newtonsoft.Json etc.)
-      - name: Restore Core packages (classic)
+      # Restore classic packages (packages.config) – pulls SmartThreadPool, Newtonsoft, etc.
+      - name: Restore Core packages
         run: nuget restore "$env:CORE_CSPROJ"
-      - name: Restore Client packages (classic)
+      - name: Restore Client packages
         run: nuget restore "$env:CLIENT_GUI_CSPROJ"
 
       - name: Build Server Core
