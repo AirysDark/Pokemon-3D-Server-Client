@@ -85,21 +85,20 @@ jobs:
           }
 
       # IMPORTANT FIX: remove ALL \Packages\*.cs includes (Exists() can't use wildcards)
-      - name: Write Directory.Build.targets (drop Packages/*.cs includes)
+      - name: Write Directory.Build.targets (force-remove Packages/*.cs)
         shell: pwsh
         run: |
           $t = @(
             '<Project>',
-            '  <!-- Remove ALL Compile includes under \Packages\ so missing files do not break the build -->',
-            '  <Target Name="FilterMissingPackagesSources" BeforeTargets="CoreCompile">',
-            '    <ItemGroup>',
-            '      <Compile Remove="**\Packages\**\*.cs" />',
-            '    </ItemGroup>',
-            '  </Target>',
+            '  <!-- Remove any Compile includes under these Packages folders at evaluation time -->',
+            '  <ItemGroup>',
+            '    <Compile Remove="RCON_GUI_Client_Listener\Packages\**\*.cs" />',
+            '    <Compile Remove="Server_Client_Listener\Packages\**\*.cs" />',
+            '    <Compile Remove="RCON_Client_Listener\Packages\**\*.cs" />',
+            '  </ItemGroup>',
             '</Project>'
-          )
-          Set-Content -Path "Directory.Build.targets" -Value ($t -join "`r`n") -Encoding UTF8
-
+    )
+    Set-Content -Path "Directory.Build.targets" -Value ($t -join "`r`n") -Encoding UTF8
       # Detect every "using *.Packages;" and generate stubs for ALL those namespaces
       - name: Generate multi-namespace Package stubs
         shell: pwsh
