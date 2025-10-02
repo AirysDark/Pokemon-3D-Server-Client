@@ -5,12 +5,21 @@ on:
     workflows: ["01 - Prep Overlay"]
     types: [completed]
 
+env:
+  CONFIGURATION: Release
+  CORE_CSPROJ: Pokemon.3D.Server.Core/Pokemon.3D.Server.Core.csproj
+  STP_VERSION: 2.3.0
+  STP_TFM: lib/net45
+
 jobs:
   build-server:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: windows-latest
     steps:
-      - name: Checkout
+      - name: Checkout same commit as prep
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Restore overlay cache
         uses: actions/cache/restore@v4
@@ -20,17 +29,34 @@ jobs:
           restore-keys: |
             overlay-${{ github.event.workflow_run.head_sha }}-
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+      - name: Copy overlay into repo
+        shell: pwsh
+        run: |
+          if (Test-Path ci-overlay) { Copy-Item -Recurse -Force ci-overlay\* .\ }
+
+      - name: Setup NuGet
+        uses: nuget/setup-nuget@v2
+
+      - name: Setup MSBuild (Visual Studio Build Tools)
+        uses: microsoft/setup-msbuild@v2
         with:
-          dotnet-version: '6.0.x'
+          vs-version: '[17.0,)'   # VS2022+
+
+      - name: Restore Core packages
+        run: nuget restore "${{ env.CORE_CSPROJ }}"
 
       - name: Build Server Core
-        run: |
-          msbuild Pokemon.3D.Server.Core/Pokemon.3D.Server.Core.csproj /p:Configuration=Debug /m /v:m
+        run: msbuild "${{ env.CORE_CSPROJ }}" /p:Configuration=${{ env.CONFIGURATION }} /p:STP_VER=${{ env.STP_VERSION }} /p:STP_TFM=${{ env.STP_TFM }} /m /v:m
 
-      - name: Upload server artifact
+      - name: Zip Server
+        shell: pwsh
+        run: |
+          $out = "Pokemon.3D.Server.Core\bin\${{ env.CONFIGURATION }}"
+          if (!(Test-Path $out)) { throw "Missing $out" }
+          Compress-Archive -Path "$out\*" -DestinationPath "Pokemon3D-Server-${{ env.CONFIGURATION }}.zip" -Force
+
+      - name: Upload Server ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: server-build
-          path: Pokemon.3D.Server.Core/bin/Debug
+          name: Pokemon3D-Server-${{ env.CONFIGURATION }}
+          path: Pokemon3D-Server-${{ env.CONFIGURATION }}.zip
