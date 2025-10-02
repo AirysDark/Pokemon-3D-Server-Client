@@ -43,45 +43,43 @@ jobs:
       - name: Write Directory.Build.props (SmartThreadPool ref + stub includes)
         shell: pwsh
         run: |
-          $props = @()
-          $props += '<Project>'
-          $props += '  <ItemGroup>'
-          $props += '    <!-- Make SmartThreadPool.dll available to all projects -->'
-          $props += '    <Reference Include="SmartThreadPool">'
-          $props += '      <HintPath>$(MSBuildThisFileDirectory)packages\SmartThreadPool.dll.$(STP_VER)\$(STP_TFM)\SmartThreadPool.dll</HintPath>'
-          $props += '      <Private>True</Private>'
-          $props += '    </Reference>'
-          $props += '  </ItemGroup>'
-          $props += ''
-          $props += '  <!-- Include generated stubs for Core (absolute paths built from this file) -->'
-          $props += '  <PropertyGroup>'
-          $props += '    <_CoreStubDir>$(MSBuildThisFileDirectory)$(CORE_DIR)\_GeneratedStubs\</_CoreStubDir>'
-          $props += '  </PropertyGroup>'
-          $props += '  <ItemGroup>'
-          $props += '    <Compile Include="$(_CoreStubDir)Package.cs" Condition="Exists($(_CoreStubDir)Package.cs)" />'
-          $props += '    <Compile Include="$(_CoreStubDir)PackageHandler.cs" Condition="Exists($(_CoreStubDir)PackageHandler.cs)" />'
-          $props += '  </ItemGroup>'
-          $props += '</Project>'
-          $content = $props -join "`r`n"
-          Set-Content -Path "Directory.Build.props" -Value $content -Encoding UTF8
+          $content = @"
+<Project>
+  <ItemGroup>
+    <!-- Make SmartThreadPool.dll available to all projects -->
+    <Reference Include="SmartThreadPool">
+      <HintPath>$(MSBuildThisFileDirectory)packages\SmartThreadPool.dll.$(STP_VER)\$(STP_TFM)\SmartThreadPool.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+  </ItemGroup>
 
-          # supply variables used inside the props via msbuild env (we'll pass them at build time)
+  <!-- Include generated stubs for Core -->
+  <PropertyGroup>
+    <_CoreStubDir>$(MSBuildThisFileDirectory)$(CORE_DIR)\_GeneratedStubs\</_CoreStubDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(_CoreStubDir)Package.cs" Condition="Exists($(_CoreStubDir)Package.cs)" />
+    <Compile Include="$(_CoreStubDir)PackageHandler.cs" Condition="Exists($(_CoreStubDir)PackageHandler.cs)" />
+  </ItemGroup>
+</Project>
+"@
+          Set-Content -Path "Directory.Build.props" -Value $content -Encoding UTF8
           'Wrote Directory.Build.props'
 
       - name: Write Directory.Build.targets (drop missing \Packages\*.cs)
         shell: pwsh
         run: |
-          $t = @()
-          $t += '<Project>'
-          $t += '  <!-- Remove any Compile includes under \Packages\ if the files do not exist -->'
-          $t += '  <Target Name="FilterMissingPackagesSources" BeforeTargets="CoreCompile">'
-          $t += '    <ItemGroup>'
-          $t += '      <!-- Unconditionally remove nonexistent \Packages\*.cs (prevents CS2001) -->'
-          $t += '      <Compile Remove="**\Packages\**\*.cs" Condition="!Exists(''@(Compile)'')" />'
-          $t += '    </ItemGroup>'
-          $t += '  </Target>'
-          $t += '</Project>'
-          $content = $t -join "`r`n"
+          $content = @"
+<Project>
+  <!-- Remove any Compile includes under \Packages\ if the files do not exist -->
+  <Target Name="FilterMissingPackagesSources" BeforeTargets="CoreCompile">
+    <ItemGroup>
+      <!-- Unconditionally remove nonexistent \Packages\*.cs (prevents CS2001) -->
+      <Compile Remove="**\Packages\**\*.cs" Condition="!Exists('@(Compile)')" />
+    </ItemGroup>
+  </Target>
+</Project>
+"@
           Set-Content -Path "Directory.Build.targets" -Value $content -Encoding UTF8
           'Wrote Directory.Build.targets'
 
