@@ -1,0 +1,58 @@
+name: 03 - Build Client
+
+on:
+  workflow_run:
+    workflows: [ "02 - Build Server" ]
+    types: [ completed ]
+
+env:
+  CONFIGURATION: Release
+  CLIENT_CSPROJ: Pokemon.3D.Server.Client.GUI/Pokemon.3D.Server.Client.GUI.csproj
+  STP_VERSION: 2.3.0
+  STP_TFM: lib/net45
+
+jobs:
+  build_client:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: windows-latest
+    steps:
+      - name: Checkout same commit as server
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Setup NuGet
+        uses: nuget/setup-nuget@v2
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Restore overlay cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-overlay
+          key: overlay-${{ github.event.workflow_run.head_sha }}
+
+      - name: Copy overlay into repo
+        shell: pwsh
+        run: |
+          Copy-Item -Recurse -Force ci-overlay\* .\
+
+      - name: Restore Client packages
+        run: nuget restore "${{ env.CLIENT_CSPROJ }}"
+
+      - name: Build Client GUI
+        run: msbuild "${{ env.CLIENT_CSPROJ }}" /p:Configuration=${{ env.CONFIGURATION }} /p:STP_VER=${{ env.STP_VERSION }} /p:STP_TFM=${{ env.STP_TFM }} /m /v:m
+
+      - name: Zip Client
+        shell: pwsh
+        run: |
+          $out = "Pokemon.3D.Server.Client.GUI\bin\${{ env.CONFIGURATION }}"
+          if (!(Test-Path $out)) { throw "Missing $out" }
+          Compress-Archive -Path "$out\*" -DestinationPath "Pokemon3D-Client-${{ env.CONFIGURATION }}.zip" -Force
+
+      - name: Upload Client ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pokemon3D-Client-${{ env.CONFIGURATION }}
+          path: Pokemon3D-Client-${{ env.CONFIGURATION }}.zip
