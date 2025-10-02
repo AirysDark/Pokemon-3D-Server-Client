@@ -133,7 +133,7 @@ jobs:
   public class Package
   {
     // Frequently referenced members (no-ops)
-    public object Client { get; set; }           // fixes .Client use sites
+    public object Client { get; set; }
     public int Id { get; set; }
     public string Name { get; set; }
     public byte[] Data { get; set; }
@@ -145,7 +145,7 @@ jobs:
     public Package() {}
     public Package(int id, string name, byte[] data = null) { Id = id; Name = name; Data = data; }
 
-    // Generic key-value helpers (no-op)
+    // Generic key-value helpers
     public void Add(string key, object value) {}
     public void Set(string key, object value) {}
     public bool TryGet<T>(string key, out T value) { value = default(T); return false; }
@@ -190,7 +190,7 @@ jobs:
         run: nuget restore "${{ env.CORE_CSPROJ }}"
 
       - name: Build Server Core
-        run: msbuild "${{ env.CORE_CSPROJ }}" /p:Configuration=${{ env.CONFIGURATION }} /p:STP_VER=${{ env.STP_VERSION }} /p:STP_TFM=${{ env:STP_TFM }} /p:CORE_DIR=${{ env.CORE_DIR }} /m /v:m
+        run: msbuild "${{ env.CORE_CSPROJ }}" /p:Configuration=${{ env.CONFIGURATION }} /p:STP_VER=${{ env.STP_VERSION }} /p:STP_TFM=${{ env.STP_TFM }} /p:CORE_DIR=${{ env.CORE_DIR }} /m /v:m
 
       - name: Zip Server
         shell: pwsh
