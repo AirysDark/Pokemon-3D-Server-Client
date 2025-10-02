@@ -33,29 +33,23 @@ jobs:
       - name: Copy overlay into repo (if present)
         shell: pwsh
         run: |
-          if (Test-Path ci-overlay) {
-            Write-Host "Overlay found; copying..."
-            Copy-Item -Recurse -Force ci-overlay\* .\
-          } else {
-            Write-Host "Overlay NOT found; continuing with self-contained steps."
-          }
+          if (Test-Path ci-overlay) { Copy-Item -Recurse -Force ci-overlay\* .\ }
 
       - name: Setup NuGet
         uses: nuget/setup-nuget@v2
 
-      - name: Setup MSBuild (Visual Studio Build Tools)
+      - name: Setup MSBuild (VS Build Tools)
         uses: microsoft/setup-msbuild@v2
         with:
           vs-version: '[17.0,)'
 
-      # Safety net: ensure SmartThreadPool is available even if overlay missing
-      - name: Ensure SmartThreadPool.dll available
+      # Ensure STP + write props including our stubs (if props not present yet)
+      - name: Ensure SmartThreadPool + Directory.Build.props
         shell: pwsh
         run: |
           if (!(Test-Path "packages\SmartThreadPool.dll.$env:STP_VERSION")) {
             nuget install SmartThreadPool.dll -Version $env:STP_VERSION -OutputDirectory packages
           }
-          # Write a minimal Directory.Build.props if none was copied from overlay
           if (!(Test-Path "Directory.Build.props")) {
             $lines = @(
               '<Project>',
@@ -65,12 +59,33 @@ jobs:
               '      <Private>True</Private>',
               '    </Reference>',
               '  </ItemGroup>',
+              '  <PropertyGroup>',
+              '    <_StubDir>$(MSBuildThisFileDirectory)$(CORE_DIR)\_GeneratedStubs\</_StubDir>',
+              '  </PropertyGroup>',
+              '  <ItemGroup>',
+              '    <Compile Include="$(_StubDir)*.cs" Condition="Exists($(_StubDir))" />',
+              '  </ItemGroup>',
               '</Project>'
             )
             Set-Content -Path "Directory.Build.props" -Value ($lines -join "`r`n") -Encoding UTF8
+          } else {
+            # Ensure props includes the stub folder even if overlay provided an older props
+            $props = Get-Content "Directory.Build.props" -Raw
+            if ($props -notmatch '_GeneratedStubs') {
+              $add = @(
+                '  <PropertyGroup>',
+                '    <_StubDir>$(MSBuildThisFileDirectory)$(CORE_DIR)\_GeneratedStubs\</_StubDir>',
+                '  </PropertyGroup>',
+                '  <ItemGroup>',
+                '    <Compile Include="$(_StubDir)*.cs" Condition="Exists($(_StubDir))" />',
+                '  </ItemGroup>'
+              ) -join "`r`n"
+              $props = $props -replace '(?s)</Project>\s*$', "$add`r`n</Project>"
+              Set-Content -Path "Directory.Build.props" -Value $props -Encoding UTF8
+            }
           }
 
-      # Safety net: drop a targets file that removes nonexistent \Packages\*.cs before compile
+      # Remove any missing \Packages\*.cs includes (guards CS2001)
       - name: Write Directory.Build.targets (filter missing Packages/*.cs)
         shell: pwsh
         run: |
@@ -78,82 +93,82 @@ jobs:
             '<Project>',
             '  <Target Name="FilterMissingPackagesSources" BeforeTargets="CoreCompile">',
             '    <ItemGroup>',
-            '      <Compile Remove="**\Packages\**\*.cs" Condition="!Exists(''**\Packages\**\*.cs'')" />',
+            "      <Compile Remove=""**\Packages\**\*.cs"" Condition=""!Exists(''**\Packages\**\*.cs'')"" />",
             '    </ItemGroup>',
             '  </Target>',
             '</Project>'
           )
           Set-Content -Path "Directory.Build.targets" -Value ($t -join "`r`n") -Encoding UTF8
 
-      # Safety net: (re)generate stubs at the exact paths if they still do not exist
-      - name: Generate Package/PackageHandler stubs if missing
+      # 🔎 Detect all using *.Packages; generate stubs in ALL those namespaces
+      - name: Generate multi-namespace Package stubs
         shell: pwsh
         run: |
           $core = "$env:CORE_DIR"
-          $targets = @(
-            "Server_Client_Listener\Packages\Package.cs",
-            "Server_Client_Listener\Packages\PackageHandler.cs",
-            "RCON_Client_Listener\Packages\Package.cs",
-            "RCON_Client_Listener\Packages\PackageHandler.cs",
-            "RCON_GUI_Client_Listener\Packages\Package.cs",
-            "RCON_GUI_Client_Listener\Packages\PackageHandler.cs"
-          )
+          $stubDir = Join-Path $core "_GeneratedStubs"
+          New-Item -ItemType Directory -Force -Path $stubDir | Out-Null
 
-          # Infer a reasonable namespace for *.Packages
-          $packagesNs = "Temporary.Stubs"
-          $player = Join-Path $core "Server_Client_Listener\Players\Player.cs"
-          if (Test-Path $player) {
-            $raw = Get-Content $player -Raw
-            $m = [Regex]::Match($raw, 'namespace\s+([A-Za-z0-9_.]+)\.Players')
-            if ($m.Success) { $packagesNs = $m.Groups[1].Value + ".Packages" }
-            else {
-              $u = [Regex]::Match($raw, 'using\s+([A-Za-z0-9_.]+\.Packages)\s*;')
-              if ($u.Success) { $packagesNs = $u.Groups[1].Value }
+          # Collect every "using X.Y.Packages;" across the repo
+          $namespaces = New-Object System.Collections.Generic.HashSet[string]
+          Get-ChildItem -Path . -Recurse -Filter *.cs | ForEach-Object {
+            $text = Get-Content $_.FullName -Raw
+            foreach ($m in [Regex]::Matches($text, 'using\s+([A-Za-z0-9_.]+\.Packages)\s*;')) {
+              [void]$namespaces.Add($m.Groups[1].Value)
             }
           }
 
-          foreach ($rel in $targets) {
-            $full = Join-Path $core $rel
-            if (Test-Path $full) { continue }
-            New-Item -ItemType Directory -Force -Path (Split-Path $full) | Out-Null
-
-            if ($full -like "*PackageHandler.cs") {
-              $code = @(
-                "// <auto-generated/>",
-                "namespace $packagesNs",
-                "{",
-                "  public static class PackageHandler",
-                "  {",
-                "    public static void Send(Package p) {}",
-                "    public static Package Parse(byte[] buffer) { return new Package(); }",
-                "  }",
-                "}"
-              )
-            } else {
-              $code = @(
-                "// <auto-generated/>",
-                "namespace $packagesNs",
-                "{",
-                "  public class Package",
-                "  {",
-                "    public int Id { get; set; }",
-                "    public string Name { get; set; }",
-                "    public byte[] Data { get; set; }",
-                "    public Package() {}",
-                "    public Package(int id, string name, byte[] data = null) { Id = id; Name = name; Data = data; }",
-                "  }",
-                "}"
-              )
+          # If none found, best-effort: infer from a Players namespace then append ".Packages"
+          if ($namespaces.Count -eq 0) {
+            $player = Join-Path $core "Server_Client_Listener\Players\Player.cs"
+            if (Test-Path $player) {
+              $raw = Get-Content $player -Raw
+              $m = [Regex]::Match($raw, 'namespace\s+([A-Za-z0-9_.]+)\.Players')
+              if ($m.Success) { [void]$namespaces.Add($m.Groups[1].Value + ".Packages") }
             }
-            Set-Content -Path $full -Value ($code -join "`r`n") -Encoding UTF8
-            Write-Host "Stubbed: $rel  (ns: $packagesNs)"
           }
+
+          if ($namespaces.Count -eq 0) {
+            # last resort single namespace
+            [void]$namespaces.Add("Temporary.Stubs.Packages")
+          }
+
+          # Build one file that defines Package + PackageHandler in ALL detected namespaces
+          $sb = New-Object System.Text.StringBuilder
+          foreach ($ns in $namespaces) {
+            [void]$sb.AppendLine("// <auto-generated/>")
+            [void]$sb.AppendLine("namespace $ns")
+            [void]$sb.AppendLine("{")
+            [void]$sb.AppendLine("  public class Package")
+            [void]$sb.AppendLine("  {")
+            [void]$sb.AppendLine("    public int Id { get; set; }")
+            [void]$sb.AppendLine("    public string Name { get; set; }")
+            [void]$sb.AppendLine("    public byte[] Data { get; set; }")
+            [void]$sb.AppendLine("    public Package() {}")
+            [void]$sb.AppendLine("    public Package(int id, string name, byte[] data = null) { Id = id; Name = name; Data = data; }")
+            [void]$sb.AppendLine("  }")
+            [void]$sb.AppendLine("}")
+            [void]$sb.AppendLine()
+            [void]$sb.AppendLine("namespace $ns")
+            [void]$sb.AppendLine("{")
+            [void]$sb.AppendLine("  public static class PackageHandler")
+            [void]$sb.AppendLine("  {")
+            [void]$sb.AppendLine("    public static void Send(Package p) {}")
+            [void]$sb.AppendLine("    public static Package Parse(byte[] buffer) { return new Package(); }")
+            [void]$sb.AppendLine("  }")
+            [void]$sb.AppendLine("}")
+            [void]$sb.AppendLine()
+          }
+
+          $out = Join-Path $stubDir "Packages.Stubs.cs"
+          Set-Content -Path $out -Value $sb.ToString() -Encoding UTF8
+          Write-Host "Generated stubs for namespaces:"
+          $namespaces | ForEach-Object { Write-Host "  - $_" }
 
       - name: Restore Core packages
         run: nuget restore "${{ env.CORE_CSPROJ }}"
 
       - name: Build Server Core
-        run: msbuild "${{ env.CORE_CSPROJ }}" /p:Configuration=${{ env.CONFIGURATION }} /p:STP_VER=${{ env.STP_VERSION }} /p:STP_TFM=${{ env.STP_TFM }} /m /v:m
+        run: msbuild "${{ env.CORE_CSPROJ }}" /p:Configuration=${{ env.CONFIGURATION }} /p:STP_VER=${{ env.STP_VERSION }} /p:STP_TFM=${{ env.STP_TFM }} /p:CORE_DIR=${{ env.CORE_DIR }} /m /v:m
 
       - name: Zip Server
         shell: pwsh
