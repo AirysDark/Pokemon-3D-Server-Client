@@ -1,12 +1,12 @@
-name: 03 - Build Client
+name: 02 - Build Server
 
 on:
   workflow_run:
-    workflows: ["02 - Build Server"]
+    workflows: ["01 - Prep Overlay"]
     types: [completed]
 
 jobs:
-  build-client:
+  build-server:
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -25,12 +25,12 @@ jobs:
         with:
           dotnet-version: '6.0.x'
 
-      - name: Build Client GUI
+      - name: Build Server Core
         run: |
-          msbuild Pokemon.3D.Server.Client.GUI/Pokemon.3D.Server.Client.GUI.csproj /p:Configuration=Debug /m /v:m
+          msbuild Pokemon.3D.Server.Core/Pokemon.3D.Server.Core.csproj /p:Configuration=Debug /m /v:m
 
-      - name: Upload client artifact
+      - name: Upload server artifact
         uses: actions/upload-artifact@v4
         with:
-          name: client-build
-          path: Pokemon.3D.Server.Client.GUI/bin/Debug
+          name: server-build
+          path: Pokemon.3D.Server.Core/bin/Debug
