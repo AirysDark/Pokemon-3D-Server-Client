@@ -43,13 +43,15 @@ jobs:
         with:
           vs-version: '[17.0,)'
 
-      # Ensure SmartThreadPool + props that include our stubs
+      # Ensure STP package + props that include our stub folder
       - name: Ensure SmartThreadPool + Directory.Build.props
         shell: pwsh
         run: |
           if (!(Test-Path "packages\SmartThreadPool.dll.$env:STP_VERSION")) {
             nuget install SmartThreadPool.dll -Version $env:STP_VERSION -OutputDirectory packages
           }
+
+          # Create or update Directory.Build.props to include STP reference + stub folder compile include
           if (!(Test-Path "Directory.Build.props")) {
             $lines = @(
               '<Project>',
@@ -84,22 +86,23 @@ jobs:
             }
           }
 
-      # IMPORTANT FIX: remove ALL \Packages\*.cs includes (Exists() can't use wildcards)
-      - name: Write Directory.Build.targets (force-remove Packages/*.cs)
+      # HARD REMOVE the project's stale Compile includes that point to missing \Packages\*.cs
+      - name: Write Directory.Build.targets (force-remove Packages/*.cs includes)
         shell: pwsh
         run: |
           $t = @(
             '<Project>',
             '  <!-- Remove any Compile includes under these Packages folders at evaluation time -->',
             '  <ItemGroup>',
-            '    <Compile Remove="RCON_GUI_Client_Listener\Packages\**\*.cs" />',
-            '    <Compile Remove="Server_Client_Listener\Packages\**\*.cs" />',
-            '    <Compile Remove="RCON_Client_Listener\Packages\**\*.cs" />',
+            '    <Compile Remove="Pokemon.3D.Server.Core\RCON_GUI_Client_Listener\Packages\**\*.cs" />',
+            '    <Compile Remove="Pokemon.3D.Server.Core\Server_Client_Listener\Packages\**\*.cs" />',
+            '    <Compile Remove="Pokemon.3D.Server.Core\RCON_Client_Listener\Packages\**\*.cs" />',
             '  </ItemGroup>',
             '</Project>'
-    )
-    Set-Content -Path "Directory.Build.targets" -Value ($t -join "`r`n") -Encoding UTF8
-      # Detect every "using *.Packages;" and generate stubs for ALL those namespaces
+          )
+          Set-Content -Path "Directory.Build.targets" -Value ($t -join "`r`n") -Encoding UTF8
+
+      # Detect all namespaces that use "*.Packages" and generate stubs in ALL of them
       - name: Generate multi-namespace Package stubs
         shell: pwsh
         run: |
