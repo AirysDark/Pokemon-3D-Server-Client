@@ -1,206 +1,95 @@
-name: 02 - Build Server
+name: 02 Build Server
 
 on:
-  workflow_run:
-    workflows: ["01 - Prep Overlay"]
-    types: [completed]
-
-env:
-  CONFIGURATION: Release
-  CORE_DIR: Pokemon.3D.Server.Core
-  CORE_CSPROJ: Pokemon.3D.Server.Core/Pokemon.3D.Server.Core.csproj
-  STP_VERSION: 2.3.0
-  STP_TFM: lib/net45
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   build-server:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: windows-latest
 
     steps:
-      - name: Checkout same commit as prep
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
-
-      - name: Restore overlay cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ci-overlay
-          key: overlay-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.id }}
-          restore-keys: |
-            overlay-${{ github.event.workflow_run.head_sha }}-
-
-      - name: Copy overlay into repo (if present)
-        shell: pwsh
-        run: |
-          if (Test-Path ci-overlay) { Copy-Item -Recurse -Force ci-overlay\* .\ }
+      - uses: actions/checkout@v3
 
       - name: Setup NuGet
-        uses: nuget/setup-nuget@v2
+        uses: NuGet/setup-nuget@v1
 
-      - name: Setup MSBuild (VS Build Tools)
-        uses: microsoft/setup-msbuild@v2
-        with:
-          vs-version: '[17.0,)'
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v1.3.1
 
-      # Ensure STP package + props that include our stub folder
-      - name: Ensure SmartThreadPool + Directory.Build.props
+      - name: Ensure SmartThreadPool
+        run: |
+          nuget install SmartThreadPool.dll -Version 2.3.0 -OutputDirectory packages
+
+      - name: Create Directory.Build.props
+        run: |
+          @"
+          <Project>
+            <ItemGroup>
+              <Reference Include="SmartThreadPool">
+                <HintPath>$(MSBuildThisFileDirectory)packages\SmartThreadPool.dll.2.3.0\lib\net45\SmartThreadPool.dll</HintPath>
+                <Private>True</Private>
+              </Reference>
+            </ItemGroup>
+            <PropertyGroup>
+              <_StubDir>$(MSBuildThisFileDirectory)Pokemon.3D.Server.Core\_GeneratedStubs\</_StubDir>
+            </PropertyGroup>
+            <ItemGroup>
+              <Compile Include="$(_StubDir)*.cs" Condition="Exists($(_StubDir))" />
+            </ItemGroup>
+          </Project>
+          "@ | Out-File Directory.Build.props -Encoding utf8
+
+      - name: Create Directory.Build.targets
+        run: |
+          @"
+          <Project>
+            <ItemGroup>
+              <Compile Remove="**\Packages\*.cs" />
+            </ItemGroup>
+          </Project>
+          "@ | Out-File Directory.Build.targets -Encoding utf8
+
+      - name: Generate stub files
         shell: pwsh
         run: |
-          if (!(Test-Path "packages\SmartThreadPool.dll.$env:STP_VERSION")) {
-            nuget install SmartThreadPool.dll -Version $env:STP_VERSION -OutputDirectory packages
-          }
-
-          if (!(Test-Path "Directory.Build.props")) {
-            $lines = @(
-              '<Project>',
-              '  <ItemGroup>',
-              '    <Reference Include="SmartThreadPool">',
-              '      <HintPath>$(MSBuildThisFileDirectory)packages\SmartThreadPool.dll.$(STP_VER)\$(STP_TFM)\SmartThreadPool.dll</HintPath>',
-              '      <Private>True</Private>',
-              '    </Reference>',
-              '  </ItemGroup>',
-              '  <PropertyGroup>',
-              '    <_StubDir>$(MSBuildThisFileDirectory)$(CORE_DIR)\_GeneratedStubs\</_StubDir>',
-              '  </PropertyGroup>',
-              '  <ItemGroup>',
-              '    <Compile Include="$(_StubDir)*.cs" Condition="Exists($(_StubDir))" />',
-              '  </ItemGroup>',
-              '</Project>'
-            )
-            Set-Content -Path "Directory.Build.props" -Value ($lines -join "`r`n") -Encoding UTF8
-          } else {
-            $props = Get-Content "Directory.Build.props" -Raw
-            if ($props -notmatch '_GeneratedStubs') {
-              $add = @(
-                '  <PropertyGroup>',
-                '    <_StubDir>$(MSBuildThisFileDirectory)$(CORE_DIR)\_GeneratedStubs\</_StubDir>',
-                '  </PropertyGroup>',
-                '  <ItemGroup>',
-                '    <Compile Include="$(_StubDir)*.cs" Condition="Exists($(_StubDir))" />',
-                '  </ItemGroup>'
-              ) -join "`r`n"
-              $props = $props -replace '(?s)</Project>\s*$', "$add`r`n</Project>"
-              Set-Content -Path "Directory.Build.props" -Value $props -Encoding UTF8
-            }
-          }
-
-      # Remove stale Compile includes pointing to non-existent \Packages\*.cs (paths are project-relative)
-      - name: Write Directory.Build.targets (force-remove Packages/*.cs includes)
-        shell: pwsh
-        run: |
-          $t = @(
-            '<Project>',
-            '  <!-- These paths are relative to each project file -->',
-            '  <ItemGroup>',
-            '    <Compile Remove="RCON_GUI_Client_Listener\Packages\**\*.cs" />',
-            '    <Compile Remove="Server_Client_Listener\Packages\**\*.cs" />',
-            '    <Compile Remove="RCON_Client_Listener\Packages\**\*.cs" />',
-            '  </ItemGroup>',
-            '</Project>'
-          )
-          Set-Content -Path "Directory.Build.targets" -Value ($t -join "`r`n") -Encoding UTF8
-
-      # Generate Package/PackageHandler stubs for ALL namespaces that do "using *.Packages;" (no here-strings)
-      - name: Generate multi-namespace Package stubs
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $core = "$env:CORE_DIR"
-          $stubDir = Join-Path $core "_GeneratedStubs"
+          $stubDir = "Pokemon.3D.Server.Core\_GeneratedStubs"
           New-Item -ItemType Directory -Force -Path $stubDir | Out-Null
 
-          # Collect namespaces that do "using *.Packages;"
-          $namespaces = New-Object System.Collections.Generic.HashSet[string]
-          Get-ChildItem -Path . -Recurse -Filter *.cs | ForEach-Object {
-            $text = Get-Content $_.FullName -Raw
-            foreach ($m in [Regex]::Matches($text, 'using\s+([A-Za-z0-9_.]+\.Packages)\s*;')) {
-              [void]$namespaces.Add($m.Groups[1].Value)
+          $stub = @"
+          namespace BuildStubs {
+            public enum PackageTypes { Unknown = 0 }
+            public static class DataItems { public const string None = "None"; }
+            public enum BeginCreateFileStatus { Unknown = 0 }
+          }
+          namespace Pokemon.Server_Client_Listener.Packages {
+            using BuildStubs;
+            public class Package {
+              public object Client { get; set; }
+              public int Id { get; set; }
+              public string Name { get; set; }
+              public byte[] Data { get; set; }
+              public PackageTypes Type { get; set; }
+            }
+            public static class PackageHandler {
+              public static void Send(Package p) { }
+              public static Package Parse(byte[] b) { return new Package(); }
             }
           }
-          if ($namespaces.Count -eq 0) {
-            $player = Join-Path $core "Server_Client_Listener\Players\Player.cs"
-            if (Test-Path $player) {
-              $raw = Get-Content $player -Raw
-              $m = [Regex]::Match($raw, 'namespace\s+([A-Za-z0-9_.]+)\.Players')
-              if ($m.Success) { [void]$namespaces.Add($m.Groups[1].Value + ".Packages") }
-            }
-          }
-          if ($namespaces.Count -eq 0) { [void]$namespaces.Add("Temporary.Stubs.Packages") }
+          "@
+          $stub | Out-File (Join-Path $stubDir "Packages.Stubs.cs") -Encoding utf8
 
-          # Build stub bodies as arrays (avoids here-string indentation issues in YAML)
-          $pkgBodyLines = @(
-            '// <auto-generated/>',
-            'public class Package',
-            '{',
-            '  public object Client { get; set; }',
-            '  public int Id { get; set; }',
-            '  public string Name { get; set; }',
-            '  public byte[] Data { get; set; }',
-            '  public string Type { get; set; }',
-            '  public object Sender { get; set; }',
-            '  public object Target { get; set; }',
-            '  public int Length => Data?.Length ?? 0;',
-            '',
-            '  public Package() {}',
-            '  public Package(int id, string name, byte[] data = null) { Id = id; Name = name; Data = data; }',
-            '',
-            '  public void Add(string key, object value) {}',
-            '  public void Set(string key, object value) {}',
-            '  public bool TryGet<T>(string key, out T value) { value = default(T); return false; }',
-            '  public T Get<T>(string key) { return default(T); }',
-            '',
-            '  public byte[] ToBytes() { return Data ?? System.Array.Empty<byte>(); }',
-            '  public static Package FromBytes(byte[] buffer) { return new Package { Data = buffer }; }',
-            '',
-            '  public override string ToString() => Name ?? base.ToString();',
-            '}'
-          )
-          $handlerBodyLines = @(
-            'public static class PackageHandler',
-            '{',
-            '  public static void Send(Package p) {}',
-            '  public static Package Parse(byte[] buffer) { return Package.FromBytes(buffer); }',
-            '}'
-          )
-
-          $pkgBody     = ($pkgBodyLines -join "`r`n")
-          $handlerBody = ($handlerBodyLines -join "`r`n")
-
-          $sb = New-Object System.Text.StringBuilder
-          foreach ($ns in $namespaces) {
-            [void]$sb.AppendLine("namespace $ns")
-            [void]$sb.AppendLine("{")
-            [void]$sb.AppendLine($pkgBody)
-            [void]$sb.AppendLine("}")
-            [void]$sb.AppendLine()
-            [void]$sb.AppendLine("namespace $ns")
-            [void]$sb.AppendLine("{")
-            [void]$sb.AppendLine($handlerBody)
-            [void]$sb.AppendLine("}")
-            [void]$sb.AppendLine()
-          }
-
-          $outFile = Join-Path $stubDir "Packages.Stubs.cs"
-          Set-Content -Path $outFile -Value $sb.ToString() -Encoding UTF8
-          Write-Host "Generated stubs into $outFile"
-
-      - name: Restore Core packages
-        run: nuget restore "${{ env.CORE_CSPROJ }}"
+      - name: Restore NuGet packages
+        run: nuget restore Pokemon.3D.Server.Core/Pokemon.3D.Server.Core.csproj
 
       - name: Build Server Core
-        run: msbuild "${{ env.CORE_CSPROJ }}" /p:Configuration=${{ env.CONFIGURATION }} /p:STP_VER=${{ env.STP_VERSION }} /p:STP_TFM=${{ env.STP_TFM }} /p:CORE_DIR=${{ env.CORE_DIR }} /m /v:m
+        run: msbuild "Pokemon.3D.Server.Core/Pokemon.3D.Server.Core.csproj" /p:Configuration=Release /m /v:m
 
-      - name: Zip Server
-        shell: pwsh
-        run: |
-          $out = "Pokemon.3D.Server.Core\bin\${{ env.CONFIGURATION }}"
-          if (!(Test-Path $out)) { throw "Missing $out" }
-          Compress-Archive -Path "$out\*" -DestinationPath "Pokemon3D-Server-${{ env.CONFIGURATION }}.zip" -Force
-
-      - name: Upload Server ZIP
-        uses: actions/upload-artifact@v4
+      - name: Archive Build
+        uses: actions/upload-artifact@v3
         with:
-          name: Pokemon3D-Server-${{ env.CONFIGURATION }}
-          path: Pokemon3D-Server-${{ env.CONFIGURATION }}.zip
+          name: Pokemon3D-Server
+          path: Pokemon.3D.Server.Core/bin/Release/
